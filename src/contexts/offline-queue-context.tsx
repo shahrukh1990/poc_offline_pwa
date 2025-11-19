@@ -93,6 +93,8 @@ export function OfflineQueueProvider({
   const isOnline = useNetworkStatus();
   const { toast } = useToast();
   const isSyncingRef = useRef(false);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   useEffect(() => {
     isSyncingRef.current = state.isSyncing;
@@ -126,17 +128,9 @@ export function OfflineQueueProvider({
       return;
     }
 
-    // Get the latest state directly inside the callback
-    let currentSubmissions: Submission[] = [];
-    dispatch({
-      type: 'START_SYNC',
-    });
-    // This is a bit of a trick to get the latest state without adding it as a dependency
-    // which would cause the useCallback to be recreated on every render.
-    // A more robust solution might involve passing state to syncQueue or using a different state management approach.
-    const getSubmissions = () => currentSubmissions;
-    currentSubmissions = state.submissions;
+    dispatch({ type: 'START_SYNC' });
 
+    const getSubmissions = () => stateRef.current.submissions;
 
     const itemsToSync = getSubmissions().filter(
       (s) =>
@@ -222,8 +216,9 @@ export function OfflineQueueProvider({
       }
     }
 
-    const successfulSyncs = getSubmissions().filter(
-      (s) => itemsToSync.some((i) => i.id === s.id) && s.status === 'sent'
+    const successfulSyncs = itemsToSync.filter(
+      (i) =>
+        getSubmissions().find((s) => s.id === i.id)?.status === 'sent'
     ).length;
 
     if (successfulSyncs > 0) {
@@ -234,7 +229,7 @@ export function OfflineQueueProvider({
     }
 
     dispatch({ type: 'END_SYNC' });
-  }, [isOnline, toast, isStorageInitialized, state.submissions]);
+  }, [isOnline, toast, isStorageInitialized]);
 
   useEffect(() => {
     if (isOnline && isStorageInitialized) {
@@ -243,7 +238,7 @@ export function OfflineQueueProvider({
     }
   }, [isOnline, isStorageInitialized, syncQueue]);
 
-  const addSubmission = async (formData: MaintenanceRequest) => {
+  const addSubmission = useCallback(async (formData: MaintenanceRequest) => {
     if (!isStorageInitialized) {
       toast({
         variant: 'destructive',
@@ -267,12 +262,13 @@ export function OfflineQueueProvider({
     });
     // Trigger sync immediately if online
     if (isOnline) {
-      syncQueue();
+      // Use a timeout to ensure state has updated before syncing
+      setTimeout(() => syncQueue(), 50);
     }
-  };
+  }, [isStorageInitialized, isOnline, toast, syncQueue]);
 
   const retrySubmission = async (id: string) => {
-    const item = state.submissions.find((s) => s.id === id);
+    const item = stateRef.current.submissions.find((s) => s.id === id);
     if (!item || !isStorageInitialized) return;
 
     const updatedItem = {
@@ -287,7 +283,7 @@ export function OfflineQueueProvider({
     });
     await storage.addOrUpdateSubmission(updatedItem);
     if (isOnline) {
-      syncQueue();
+      setTimeout(() => syncQueue(), 50);
     }
   };
 
@@ -295,7 +291,7 @@ export function OfflineQueueProvider({
     id: string,
     formData: MaintenanceRequest
   ) => {
-    const item = state.submissions.find((s) => s.id === id);
+    const item = stateRef.current.submissions.find((s) => s.id === id);
     if (!item || !isStorageInitialized) return;
 
     const updatedItem = { ...item, formData };
