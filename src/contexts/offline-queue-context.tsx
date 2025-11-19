@@ -243,7 +243,7 @@ export function OfflineQueueProvider({
       return;
     }
     const newSubmission: Submission = {
-      id: new Date().toISOString(),
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       formData,
       status: 'pending',
       attempts: 0,
