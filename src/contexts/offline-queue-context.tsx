@@ -11,22 +11,13 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { Capacitor } from '@capacitor/core';
 import type { Submission, MaintenanceRequest } from '@/lib/types';
 import { useNetworkStatus } from '@/hooks/use-network-status';
 import { useToast } from '@/hooks/use-toast';
-import * as sqlite from '@/lib/sqlite-service';
-import * as localStorageService from '@/lib/local-storage-service';
+import * as storage from '@/lib/storage-service';
 import type { StorageService } from '@/lib/storage-service.interface';
 
 const MAX_RETRIES = 5;
-let storage: StorageService;
-
-if (Capacitor.isNativePlatform()) {
-  storage = sqlite;
-} else {
-  storage = localStorageService;
-}
 
 type State = {
   submissions: Submission[];
@@ -232,7 +223,6 @@ export function OfflineQueueProvider({
     dispatch({ type: 'END_SYNC' });
   }, [isOnline, toast, isStorageInitialized]);
 
-  // This useEffect will now *only* run when the app comes back online.
   useEffect(() => {
     if (isOnline && isStorageInitialized) {
       const timer = setTimeout(() => syncQueue(), 1000); // Small delay to allow state to settle
@@ -334,5 +324,3 @@ export function useOfflineQueue() {
   }
   return context;
 }
-
-    
