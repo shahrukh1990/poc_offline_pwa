@@ -11,13 +11,21 @@ import React, {
 import type { Submission, MaintenanceRequest } from '@/lib/types';
 import { useNetworkStatus } from '@/hooks/use-network-status';
 import { useToast } from '@/hooks/use-toast';
+import {
+  db,
+  initDb,
+  getSubmissions,
+  addOrUpdateSubmission,
+} from '@/lib/sqlite-service';
+import { Capacitor } from '@capacitor/core';
+import { JeepSqlite } from 'jeep-sqlite/dist/components/jeep-sqlite';
 
-const QUEUE_STORAGE_KEY = 'offline-submission-queue';
 const MAX_RETRIES = 5;
 
 type State = {
   submissions: Submission[];
   isSyncing: boolean;
+  isDbInitialized: boolean;
 };
 
 type Action =
@@ -25,12 +33,23 @@ type Action =
   | { type: 'ADD_SUBMISSION'; payload: Submission }
   | { type: 'START_SYNC' }
   | { type: 'END_SYNC' }
-  | { type: 'UPDATE_SUBMISSION'; payload: Partial<Submission> & { id: string } };
+  | { type: 'UPDATE_SUBMISSION'; payload: Partial<Submission> & { id: string } }
+  | { type: 'DB_INITIALIZED' };
 
 const initialState: State = {
   submissions: [],
   isSyncing: false,
+  isDbInitialized: false,
 };
+
+// Define jeep-sqlite custom element
+if (Capacitor.getPlatform() === 'web') {
+  try {
+    customElements.define('jeep-sqlite', JeepSqlite);
+  } catch (e) {
+    console.warn('jeep-sqlite already defined');
+  }
+}
 
 function queueReducer(state: State, action: Action): State {
   switch (action.type) {
@@ -53,6 +72,8 @@ function queueReducer(state: State, action: Action): State {
         ),
       };
     }
+    case 'DB_INITIALIZED':
+      return { ...state, isDbInitialized: true };
     default:
       return state;
   }
@@ -61,6 +82,7 @@ function queueReducer(state: State, action: Action): State {
 interface OfflineQueueContextType {
   submissions: Submission[];
   isSyncing: boolean;
+  isDbInitialized: boolean;
   addSubmission: (formData: MaintenanceRequest) => void;
   retrySubmission: (id: string) => void;
   updateSubmissionData: (id: string, formData: MaintenanceRequest) => void;
@@ -85,30 +107,27 @@ export function OfflineQueueProvider({
   }, [state.isSyncing]);
 
   useEffect(() => {
-    try {
-      const storedQueue = localStorage.getItem(QUEUE_STORAGE_KEY);
-      if (storedQueue) {
-        const parsedQueue = JSON.parse(storedQueue) as Submission[];
-        dispatch({ type: 'LOAD_QUEUE', payload: parsedQueue });
+    const initializeDatabase = async () => {
+      try {
+        await initDb();
+        dispatch({ type: 'DB_INITIALIZED' });
+        const subs = await getSubmissions();
+        dispatch({ type: 'LOAD_QUEUE', payload: subs });
+      } catch (error) {
+        console.error('Failed to initialize database:', error);
+        toast({
+          variant: 'destructive',
+          title: 'Database Error',
+          description:
+            'Could not initialize local storage. Offline mode may not work.',
+        });
       }
-    } catch (error) {
-      console.error('Failed to load submission queue from localStorage:', error);
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(
-        QUEUE_STORAGE_KEY,
-        JSON.stringify(state.submissions)
-      );
-    } catch (error) {
-      console.error('Failed to save submission queue to localStorage:', error);
-    }
-  }, [state.submissions]);
+    };
+    initializeDatabase();
+  }, [toast]);
 
   const syncQueue = useCallback(async () => {
-    if (!isOnline || isSyncingRef.current) {
+    if (!isOnline || isSyncingRef.current || !state.isDbInitialized) {
       return;
     }
 
@@ -130,11 +149,14 @@ export function OfflineQueueProvider({
       return;
     }
 
-    const syncPromises = itemsToSync.map(async (item) => {
+    for (const item of itemsToSync) {
+      const updatedItem: Submission = { ...item, status: 'sending' };
       dispatch({
         type: 'UPDATE_SUBMISSION',
         payload: { id: item.id, status: 'sending' },
       });
+      await addOrUpdateSubmission(updatedItem);
+
       try {
         const response = await fetch('/api/submit', {
           method: 'POST',
@@ -145,16 +167,25 @@ export function OfflineQueueProvider({
         if (!response.ok) {
           throw new Error(`Server error: ${response.statusText}`);
         }
-
+        
+        const finalItem: Submission = { ...updatedItem, status: 'sent' };
         dispatch({
           type: 'UPDATE_SUBMISSION',
           payload: { id: item.id, status: 'sent' },
         });
+        await addOrUpdateSubmission(finalItem);
+
       } catch (error) {
         console.error(`Failed to submit item ${item.id}:`, error);
         const newAttempts = item.attempts + 1;
+        let failedItem: Submission;
 
         if (newAttempts >= MAX_RETRIES) {
+          failedItem = {
+            ...updatedItem,
+            status: 'failed',
+            attempts: newAttempts,
+          };
           dispatch({
             type: 'UPDATE_SUBMISSION',
             payload: {
@@ -166,6 +197,12 @@ export function OfflineQueueProvider({
         } else {
           const delay = 1000 * Math.pow(2, newAttempts - 1);
           const nextAttemptAt = Date.now() + delay;
+          failedItem = {
+            ...updatedItem,
+            status: 'pending',
+            attempts: newAttempts,
+            nextAttemptAt,
+          };
           dispatch({
             type: 'UPDATE_SUBMISSION',
             payload: {
@@ -176,14 +213,14 @@ export function OfflineQueueProvider({
             },
           });
         }
+        await addOrUpdateSubmission(failedItem);
       }
-    });
+    }
 
-    await Promise.allSettled(syncPromises);
-
-    const newSentCount = state.submissions.filter(
-      (s) => itemsToSync.some((i) => i.id === s.id) && s.status === 'sent'
+    const newSentCount = itemsToSync.filter(
+      (item) => state.submissions.find((s) => s.id === item.id)?.status === 'sent'
     ).length;
+
     if (newSentCount > 0) {
       toast({
         title: 'Sync Complete',
@@ -192,15 +229,23 @@ export function OfflineQueueProvider({
     }
 
     dispatch({ type: 'END_SYNC' });
-  }, [isOnline, state.submissions, toast]);
+  }, [isOnline, state.submissions, toast, state.isDbInitialized]);
 
   useEffect(() => {
-    if (isOnline) {
+    if (isOnline && state.isDbInitialized) {
       syncQueue();
     }
-  }, [isOnline, syncQueue]);
+  }, [isOnline, syncQueue, state.isDbInitialized]);
 
-  const addSubmission = (formData: MaintenanceRequest) => {
+  const addSubmission = async (formData: MaintenanceRequest) => {
+    if (!state.isDbInitialized) {
+      toast({
+        variant: 'destructive',
+        title: 'Database not ready',
+        description: 'Please wait a moment and try again.',
+      });
+      return;
+    }
     const newSubmission: Submission = {
       id: new Date().toISOString(),
       formData,
@@ -209,6 +254,7 @@ export function OfflineQueueProvider({
       timestamp: Date.now(),
     };
     dispatch({ type: 'ADD_SUBMISSION', payload: newSubmission });
+    await addOrUpdateSubmission(newSubmission);
     toast({
       title: 'Submission Queued',
       description: 'Your request has been saved and will be sent when online.',
@@ -218,22 +264,40 @@ export function OfflineQueueProvider({
     }
   };
 
-  const retrySubmission = (id: string) => {
+  const retrySubmission = async (id: string) => {
+    const item = state.submissions.find(s => s.id === id);
+    if (!item || !state.isDbInitialized) return;
+
+    const updatedItem = {
+      ...item,
+      status: 'pending' as const,
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+    };
     dispatch({
       type: 'UPDATE_SUBMISSION',
-      payload: { id, status: 'pending', attempts: 0, nextAttemptAt: Date.now() },
+      payload: updatedItem,
     });
+    await addOrUpdateSubmission(updatedItem);
     if (isOnline) {
       syncQueue();
     }
   };
-  
-  const updateSubmissionData = (id: string, formData: MaintenanceRequest) => {
+
+  const updateSubmissionData = async (
+    id: string,
+    formData: MaintenanceRequest
+  ) => {
+    const item = state.submissions.find(s => s.id === id);
+    if (!item || !state.isDbInitialized) return;
+
+    const updatedItem = { ...item, formData };
     dispatch({
       type: 'UPDATE_SUBMISSION',
       payload: { id, formData },
     });
-     toast({
+    await addOrUpdateSubmission(updatedItem);
+    toast({
       title: 'Submission Updated',
       description: 'The submission data has been updated based on AI suggestion.',
     });
@@ -242,6 +306,7 @@ export function OfflineQueueProvider({
   const value = {
     submissions: state.submissions,
     isSyncing: state.isSyncing,
+    isDbInitialized: state.isDbInitialized,
     addSubmission,
     retrySubmission,
     updateSubmissionData,
@@ -250,6 +315,7 @@ export function OfflineQueueProvider({
   return (
     <OfflineQueueContext.Provider value={value}>
       {children}
+      {Capacitor.getPlatform() === 'web' && <jeep-sqlite></jeep-sqlite>}
     </OfflineQueueContext.Provider>
   );
 }
