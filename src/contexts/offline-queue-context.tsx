@@ -14,7 +14,7 @@ import type { Submission, MaintenanceRequest } from '@/lib/types';
 import { useNetworkStatus } from '@/hooks/use-network-status';
 import { useToast } from '@/hooks/use-toast';
 import * as sqlite from '@/lib/sqlite-service';
-import * as-storage from '@/lib/local-storage-service';
+import * as localStorageService from '@/lib/local-storage-service';
 import type { StorageService } from '@/lib/storage-service.interface';
 
 const MAX_RETRIES = 5;
@@ -23,7 +23,7 @@ let storage: StorageService;
 if (Capacitor.isNativePlatform()) {
   storage = sqlite;
 } else {
-  storage =-storage;
+  storage = localStorageService;
 }
 
 type State = {
