@@ -142,12 +142,17 @@ export function OfflineQueueProvider({
     });
 
     for (const item of itemsToSync) {
-      const updatedItem: Submission = { ...item, status: 'sending' };
+      // Ensure we are not processing an item that has changed status in another async operation
+      const currentItemState = getSubmissions().find(s => s.id === item.id);
+      if (!currentItemState || !(currentItemState.status === 'pending' || currentItemState.status === 'failed')) {
+        continue;
+      }
+
       dispatch({
         type: 'UPDATE_SUBMISSION',
         payload: { id: item.id, status: 'sending' },
       });
-      await storage.addOrUpdateSubmission(updatedItem);
+      await storage.addOrUpdateSubmission({ ...currentItemState, status: 'sending' });
 
       try {
         const response = await fetch('/api/submit', {
@@ -160,7 +165,7 @@ export function OfflineQueueProvider({
           throw new Error(`Server error: ${response.statusText}`);
         }
 
-        const finalItem: Submission = { ...updatedItem, status: 'sent' };
+        const finalItem: Submission = { ...currentItemState, status: 'sent' };
         dispatch({
           type: 'UPDATE_SUBMISSION',
           payload: { id: item.id, status: 'sent' },
@@ -173,7 +178,7 @@ export function OfflineQueueProvider({
 
         if (newAttempts >= MAX_RETRIES) {
           failedItem = {
-            ...updatedItem,
+            ...currentItemState,
             status: 'failed',
             attempts: newAttempts,
           };
@@ -189,7 +194,7 @@ export function OfflineQueueProvider({
           const delay = 1000 * Math.pow(2, newAttempts - 1);
           const nextAttemptAt = Date.now() + delay;
           failedItem = {
-            ...updatedItem,
+            ...currentItemState,
             status: 'pending',
             attempts: newAttempts,
             nextAttemptAt,
