@@ -18,7 +18,7 @@ export function useNetworkStatus() {
 
     return () => {
       window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', 'handleOffline');
+      window.removeEventListener('offline', handleOffline);
     };
   }, []);
 
