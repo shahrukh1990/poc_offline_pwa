@@ -232,6 +232,7 @@ export function OfflineQueueProvider({
     dispatch({ type: 'END_SYNC' });
   }, [isOnline, toast, isStorageInitialized]);
 
+  // This useEffect will now *only* run when the app comes back online.
   useEffect(() => {
     if (isOnline && isStorageInitialized) {
       const timer = setTimeout(() => syncQueue(), 1000); // Small delay to allow state to settle
@@ -268,7 +269,7 @@ export function OfflineQueueProvider({
     }
   }, [isStorageInitialized, isOnline, toast, syncQueue]);
 
-  const retrySubmission = async (id: string) => {
+  const retrySubmission = useCallback(async (id: string) => {
     const item = stateRef.current.submissions.find((s) => s.id === id);
     if (!item || !isStorageInitialized) return;
 
@@ -286,7 +287,7 @@ export function OfflineQueueProvider({
     if (isOnline) {
       setTimeout(() => syncQueue(), 50);
     }
-  };
+  }, [isStorageInitialized, isOnline, syncQueue]);
 
   const updateSubmissionData = async (
     id: string,
