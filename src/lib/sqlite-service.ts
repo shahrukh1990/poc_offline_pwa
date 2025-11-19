@@ -6,11 +6,12 @@ import {
   SQLiteDBConnection,
 } from '@capacitor-community/sqlite';
 import type { Submission } from '@/lib/types';
+import type { StorageService } from './storage-service.interface';
 
 const DB_NAME = 'offline_forms_db';
 const TABLE_NAME = 'submissions';
 
-export let db: SQLiteDBConnection | null = null;
+let db: SQLiteDBConnection | null = null;
 let sqlite: SQLiteConnection | null = null;
 
 const schema = `
@@ -24,17 +25,11 @@ const schema = `
   );
 `;
 
-export async function initDb() {
-  if (db) return; // Already initialized
+async function init(): Promise<void> {
+  // This check is important to avoid re-initializing on hot reloads
+  if (db) return;
 
-  const platform = Capacitor.getPlatform();
-  
   try {
-    if (platform === 'web') {
-      const sqlitePlugin = CapacitorSQLite;
-      await sqlitePlugin.initWebStore();
-    }
-    
     sqlite = new SQLiteConnection(CapacitorSQLite);
     const ret = await sqlite.checkConnectionsConsistency();
     const isConn = (await sqlite.isConnection(DB_NAME, false)).result;
@@ -47,39 +42,27 @@ export async function initDb() {
 
     await db.open();
     await db.execute(schema);
-    await db.close(); // Close after schema setup, will be reopened for operations
+    // Keep connection open for native
   } catch (e) {
     console.error('Error initializing SQLite database:', e);
+    // If init fails, subsequent calls will throw "Database not initialized."
+    // This is better than crashing the app.
+    db = null;
     throw e;
   }
 }
 
-async function performDbOperation<T>(operation: (db: SQLiteDBConnection) => Promise<T>): Promise<T> {
-  if (!sqlite || !db) throw new Error('Database not initialized.');
-  try {
-    await db.open();
-    return await operation(db);
-  } catch (e) {
-    console.error('Database operation failed:', e);
-    throw e;
-  } finally {
-    if (db && await db.isOpen()) {
-       await db.close();
-    }
-  }
+async function getSubmissions(): Promise<Submission[]> {
+  if (!db) throw new Error('Database not initialized.');
+  const res = await db.query(`SELECT * FROM ${TABLE_NAME} ORDER BY timestamp DESC;`);
+  return (res.values || []).map(row => ({
+    ...row,
+    formData: JSON.parse(row.formData),
+  }));
 }
 
-export async function getSubmissions(): Promise<Submission[]> {
-  return performDbOperation(async (db) => {
-    const res = await db.query(`SELECT * FROM ${TABLE_NAME} ORDER BY timestamp DESC;`);
-    return (res.values || []).map(row => ({
-      ...row,
-      formData: JSON.parse(row.formData),
-    }));
-  });
-}
-
-export async function addOrUpdateSubmission(submission: Submission): Promise<void> {
+async function addOrUpdateSubmission(submission: Submission): Promise<void> {
+  if (!db) throw new Error('Database not initialized.');
   const { id, formData, status, attempts, timestamp, nextAttemptAt } = submission;
   const query = `
     INSERT OR REPLACE INTO ${TABLE_NAME} (id, formData, status, attempts, timestamp, nextAttemptAt)
@@ -94,9 +77,12 @@ export async function addOrUpdateSubmission(submission: Submission): Promise<voi
     nextAttemptAt ?? null
   ];
 
-  await performDbOperation(db => db.run(query, values));
+  await db.run(query, values);
 }
 
-export async function deleteSubmission(id: string): Promise<void> {
-  await performDbOperation(db => db.run(`DELETE FROM ${TABLE_NAME} WHERE id = ?;`, [id]));
+async function deleteSubmission(id: string): Promise<void> {
+  if (!db) throw new Error('Database not initialized.');
+  await db.run(`DELETE FROM ${TABLE_NAME} WHERE id = ?;`, [id]);
 }
+
+export { init, getSubmissions, addOrUpdateSubmission, deleteSubmission };

@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState } from 'react';
-import dynamic from 'next/dynamic';
 import {
   AlertCircle,
   BrainCircuit,
@@ -20,25 +19,9 @@ import type { Submission } from '@/lib/types';
 import { correctFormData } from '@/ai/flows/ai-data-correction';
 import { Skeleton } from '@/components/ui/skeleton';
 
-const DatabaseProvider = dynamic(
-  () => import('@/components/database-provider'),
-  {
-    ssr: false,
-    loading: () => (
-       <div className="min-h-screen bg-background p-4 md:p-8">
-        <div className="mx-auto max-w-3xl space-y-8">
-          <Skeleton className="h-96 w-full" />
-          <Skeleton className="h-12 w-full" />
-          <Skeleton className="h-48 w-full" />
-        </div>
-      </div>
-    ),
-  }
-);
-
 
 export default function Home() {
-  const { submissions, retrySubmission, updateSubmissionData, isDbInitialized } =
+  const { submissions, retrySubmission, updateSubmissionData, isStorageInitialized } =
     useOfflineQueue();
   const isOnline = useNetworkStatus();
   const [isAiDialogOpen, setIsAiDialogOpen] = useState(false);
@@ -102,7 +85,6 @@ export default function Home() {
   ).length;
 
   return (
-     <DatabaseProvider>
       <div className="min-h-screen bg-background">
         <header className="sticky top-0 z-10 w-full border-b bg-card shadow-sm">
           <div className="container mx-auto flex h-16 items-center justify-between px-4">
@@ -127,7 +109,7 @@ export default function Home() {
         </header>
 
         <main className="container mx-auto p-4 md:p-8">
-         {!isDbInitialized ? (
+         {!isStorageInitialized ? (
              <div className="mx-auto max-w-3xl space-y-8">
               <Skeleton className="h-96 w-full" />
               <Skeleton className="h-12 w-full" />
@@ -168,6 +150,5 @@ export default function Home() {
           originalItems={pendingItemsForAI}
         />
       </div>
-    </DatabaseProvider>
   );
 }

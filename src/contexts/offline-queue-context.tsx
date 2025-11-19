@@ -9,16 +9,22 @@ import React, {
   useRef,
   useState,
 } from 'react';
+import { Capacitor } from '@capacitor/core';
 import type { Submission, MaintenanceRequest } from '@/lib/types';
 import { useNetworkStatus } from '@/hooks/use-network-status';
 import { useToast } from '@/hooks/use-toast';
-import {
-  initDb,
-  getSubmissions as dbGetSubmissions,
-  addOrUpdateSubmission as dbAddOrUpdateSubmission,
-} from '@/lib/sqlite-service';
+import * as sqlite from '@/lib/sqlite-service';
+import * as-storage from '@/lib/local-storage-service';
+import type { StorageService } from '@/lib/storage-service.interface';
 
 const MAX_RETRIES = 5;
+let storage: StorageService;
+
+if (Capacitor.isNativePlatform()) {
+  storage = sqlite;
+} else {
+  storage =-storage;
+}
 
 type State = {
   submissions: Submission[];
@@ -31,8 +37,6 @@ type Action =
   | { type: 'START_SYNC' }
   | { type: 'END_SYNC' }
   | { type: 'UPDATE_SUBMISSION'; payload: Partial<Submission> & { id: string } }
-  | { type: 'SET_DB_STATUS'; payload: boolean };
-
 
 const initialState: State = {
   submissions: [],
@@ -68,12 +72,10 @@ function queueReducer(state: State, action: Action): State {
 interface OfflineQueueContextType {
   submissions: Submission[];
   isSyncing: boolean;
-  isDbInitialized: boolean;
+  isStorageInitialized: boolean;
   addSubmission: (formData: MaintenanceRequest) => void;
   retrySubmission: (id: string) => void;
   updateSubmissionData: (id: string, formData: MaintenanceRequest) => void;
-  setDbInitialized: (status: boolean) => void;
-  loadSubmissionsFromDb: () => Promise<void>;
 }
 
 const OfflineQueueContext = createContext<OfflineQueueContextType | undefined>(
@@ -86,7 +88,7 @@ export function OfflineQueueProvider({
   children: React.ReactNode;
 }) {
   const [state, dispatch] = useReducer(queueReducer, initialState);
-  const [isDbInitialized, setDbInitialized] = useState(false);
+  const [isStorageInitialized, setStorageInitialized] = useState(false);
   const isOnline = useNetworkStatus();
   const { toast } = useToast();
   const isSyncingRef = useRef(false);
@@ -94,35 +96,37 @@ export function OfflineQueueProvider({
   useEffect(() => {
     isSyncingRef.current = state.isSyncing;
   }, [state.isSyncing]);
+  
+  const loadInitialData = useCallback(async () => {
+    try {
+      await storage.init();
+      const subs = await storage.getSubmissions();
+      dispatch({ type: 'LOAD_QUEUE', payload: subs });
+      setStorageInitialized(true);
+    } catch (error) {
+      console.error('Failed to initialize storage and load data:', error);
+      toast({
+        variant: 'destructive',
+        title: 'Storage Error',
+        description: 'Could not load saved data. Offline features may not work.',
+      });
+      setStorageInitialized(true); // Still allow app to run
+    }
+  }, [toast]);
 
-
-  const loadSubmissionsFromDb = useCallback(async () => {
-     if (!isDbInitialized) return;
-      try {
-        const subs = await dbGetSubmissions();
-        dispatch({ type: 'LOAD_QUEUE', payload: subs });
-      } catch (error) {
-        console.error('Failed to load submissions from DB:', error);
-        toast({
-          variant: 'destructive',
-          title: 'Database Error',
-          description:
-            'Could not load saved data. Offline submissions may be unavailable.',
-        });
-      }
-  }, [isDbInitialized, toast]);
+  useEffect(() => {
+    if (!isStorageInitialized) {
+      loadInitialData();
+    }
+  }, [isStorageInitialized, loadInitialData]);
 
   const syncQueue = useCallback(async () => {
-    if (!isOnline || isSyncingRef.current || !isDbInitialized) {
+    if (!isOnline || isSyncingRef.current || !isStorageInitialized) {
       return;
     }
 
     dispatch({ type: 'START_SYNC' });
-    toast({
-      title: 'Syncing...',
-      description: 'Attempting to send offline submissions.',
-    });
-
+    
     const itemsToSync = state.submissions.filter(
       (s) =>
         (s.status === 'pending' ||
@@ -135,13 +139,18 @@ export function OfflineQueueProvider({
       return;
     }
 
+    toast({
+      title: 'Syncing...',
+      description: `Attempting to send ${itemsToSync.length} offline submission(s).`,
+    });
+
     for (const item of itemsToSync) {
       const updatedItem: Submission = { ...item, status: 'sending' };
       dispatch({
         type: 'UPDATE_SUBMISSION',
         payload: { id: item.id, status: 'sending' },
       });
-      await dbAddOrUpdateSubmission(updatedItem);
+      await storage.addOrUpdateSubmission(updatedItem);
 
       try {
         const response = await fetch('/api/submit', {
@@ -159,7 +168,7 @@ export function OfflineQueueProvider({
           type: 'UPDATE_SUBMISSION',
           payload: { id: item.id, status: 'sent' },
         });
-        await dbAddOrUpdateSubmission(finalItem);
+        await storage.addOrUpdateSubmission(finalItem);
 
       } catch (error) {
         console.error(`Failed to submit item ${item.id}:`, error);
@@ -199,35 +208,36 @@ export function OfflineQueueProvider({
             },
           });
         }
-        await dbAddOrUpdateSubmission(failedItem);
+        await storage.addOrUpdateSubmission(failedItem);
       }
     }
 
-    const newSentCount = itemsToSync.filter(
-      (item) => state.submissions.find((s) => s.id === item.id)?.status === 'sent'
+    const successfulSyncs = state.submissions.filter(
+        (s) => itemsToSync.some(i => i.id === s.id) && s.status === 'sent'
     ).length;
 
-    if (newSentCount > 0) {
+    if (successfulSyncs > 0) {
       toast({
         title: 'Sync Complete',
-        description: `${newSentCount} submissions sent successfully.`,
+        description: `${successfulSyncs} submission(s) sent successfully.`,
       });
     }
 
     dispatch({ type: 'END_SYNC' });
-  }, [isOnline, state.submissions, toast, isDbInitialized]);
+  }, [isOnline, state.submissions, toast, isStorageInitialized]);
 
   useEffect(() => {
-    if (isOnline && isDbInitialized) {
-      syncQueue();
+    if (isOnline && isStorageInitialized) {
+      const timer = setTimeout(() => syncQueue(), 1000); // Small delay to allow state to settle
+      return () => clearTimeout(timer);
     }
-  }, [isOnline, syncQueue, isDbInitialized]);
+  }, [isOnline, isStorageInitialized, syncQueue]);
 
   const addSubmission = async (formData: MaintenanceRequest) => {
-    if (!isDbInitialized) {
+    if (!isStorageInitialized) {
       toast({
         variant: 'destructive',
-        title: 'Database not ready',
+        title: 'Storage not ready',
         description: 'Please wait a moment and try again.',
       });
       return;
@@ -240,19 +250,20 @@ export function OfflineQueueProvider({
       timestamp: Date.now(),
     };
     dispatch({ type: 'ADD_SUBMISSION', payload: newSubmission });
-    await dbAddOrUpdateSubmission(newSubmission);
+    await storage.addOrUpdateSubmission(newSubmission);
     toast({
       title: 'Submission Queued',
       description: 'Your request has been saved and will be sent when online.',
     });
+    // Trigger sync immediately if online
     if (isOnline) {
-      syncQueue();
+       syncQueue();
     }
   };
 
   const retrySubmission = async (id: string) => {
     const item = state.submissions.find(s => s.id === id);
-    if (!item || !isDbInitialized) return;
+    if (!item || !isStorageInitialized) return;
 
     const updatedItem = {
       ...item,
@@ -264,7 +275,7 @@ export function OfflineQueueProvider({
       type: 'UPDATE_SUBMISSION',
       payload: updatedItem,
     });
-    await dbAddOrUpdateSubmission(updatedItem);
+    await storage.addOrUpdateSubmission(updatedItem);
     if (isOnline) {
       syncQueue();
     }
@@ -275,14 +286,14 @@ export function OfflineQueueProvider({
     formData: MaintenanceRequest
   ) => {
     const item = state.submissions.find(s => s.id === id);
-    if (!item || !isDbInitialized) return;
+    if (!item || !isStorageInitialized) return;
 
     const updatedItem = { ...item, formData };
     dispatch({
       type: 'UPDATE_SUBMISSION',
       payload: { id, formData },
     });
-    await dbAddOrUpdateSubmission(updatedItem);
+    await storage.addOrUpdateSubmission(updatedItem);
     toast({
       title: 'Submission Updated',
       description: 'The submission data has been updated based on AI suggestion.',
@@ -292,12 +303,10 @@ export function OfflineQueueProvider({
   const value = {
     submissions: state.submissions,
     isSyncing: state.isSyncing,
-    isDbInitialized,
+    isStorageInitialized,
     addSubmission,
     retrySubmission,
     updateSubmissionData,
-    setDbInitialized,
-    loadSubmissionsFromDb,
   };
 
   return (

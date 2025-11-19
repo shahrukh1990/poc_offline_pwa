@@ -32,13 +32,6 @@ const nextConfig: NextConfig = {
       },
     ],
   },
-  webpack: (config) => {
-    config.resolve.alias = {
-      ...config.resolve.alias,
-      'jeep-sqlite/loader': 'jeep-sqlite/dist/esm/index.js',
-    };
-    return config;
-  },
 };
 
 export default nextConfig;
