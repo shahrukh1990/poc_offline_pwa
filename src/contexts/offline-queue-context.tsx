@@ -1,3 +1,4 @@
+// src/contexts/offline-queue-context.tsx
 'use client';
 
 import React, {
@@ -36,7 +37,7 @@ type Action =
   | { type: 'ADD_SUBMISSION'; payload: Submission }
   | { type: 'START_SYNC' }
   | { type: 'END_SYNC' }
-  | { type: 'UPDATE_SUBMISSION'; payload: Partial<Submission> & { id: string } }
+  | { type: 'UPDATE_SUBMISSION'; payload: Partial<Submission> & { id: string } };
 
 const initialState: State = {
   submissions: [],
@@ -96,7 +97,7 @@ export function OfflineQueueProvider({
   useEffect(() => {
     isSyncingRef.current = state.isSyncing;
   }, [state.isSyncing]);
-  
+
   const loadInitialData = useCallback(async () => {
     try {
       await storage.init();
@@ -125,9 +126,19 @@ export function OfflineQueueProvider({
       return;
     }
 
-    dispatch({ type: 'START_SYNC' });
-    
-    const itemsToSync = state.submissions.filter(
+    // Get the latest state directly inside the callback
+    let currentSubmissions: Submission[] = [];
+    dispatch({
+      type: 'START_SYNC',
+    });
+    // This is a bit of a trick to get the latest state without adding it as a dependency
+    // which would cause the useCallback to be recreated on every render.
+    // A more robust solution might involve passing state to syncQueue or using a different state management approach.
+    const getSubmissions = () => currentSubmissions;
+    currentSubmissions = state.submissions;
+
+
+    const itemsToSync = getSubmissions().filter(
       (s) =>
         (s.status === 'pending' ||
           (s.status === 'failed' && s.attempts < MAX_RETRIES)) &&
@@ -162,14 +173,13 @@ export function OfflineQueueProvider({
         if (!response.ok) {
           throw new Error(`Server error: ${response.statusText}`);
         }
-        
+
         const finalItem: Submission = { ...updatedItem, status: 'sent' };
         dispatch({
           type: 'UPDATE_SUBMISSION',
           payload: { id: item.id, status: 'sent' },
         });
         await storage.addOrUpdateSubmission(finalItem);
-
       } catch (error) {
         console.error(`Failed to submit item ${item.id}:`, error);
         const newAttempts = item.attempts + 1;
@@ -212,8 +222,8 @@ export function OfflineQueueProvider({
       }
     }
 
-    const successfulSyncs = state.submissions.filter(
-        (s) => itemsToSync.some(i => i.id === s.id) && s.status === 'sent'
+    const successfulSyncs = getSubmissions().filter(
+      (s) => itemsToSync.some((i) => i.id === s.id) && s.status === 'sent'
     ).length;
 
     if (successfulSyncs > 0) {
@@ -224,7 +234,7 @@ export function OfflineQueueProvider({
     }
 
     dispatch({ type: 'END_SYNC' });
-  }, [isOnline, state.submissions, toast, isStorageInitialized]);
+  }, [isOnline, toast, isStorageInitialized, state.submissions]);
 
   useEffect(() => {
     if (isOnline && isStorageInitialized) {
@@ -243,7 +253,7 @@ export function OfflineQueueProvider({
       return;
     }
     const newSubmission: Submission = {
-      id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      id: crypto.randomUUID(),
       formData,
       status: 'pending',
       attempts: 0,
@@ -257,12 +267,12 @@ export function OfflineQueueProvider({
     });
     // Trigger sync immediately if online
     if (isOnline) {
-       syncQueue();
+      syncQueue();
     }
   };
 
   const retrySubmission = async (id: string) => {
-    const item = state.submissions.find(s => s.id === id);
+    const item = state.submissions.find((s) => s.id === id);
     if (!item || !isStorageInitialized) return;
 
     const updatedItem = {
@@ -285,7 +295,7 @@ export function OfflineQueueProvider({
     id: string,
     formData: MaintenanceRequest
   ) => {
-    const item = state.submissions.find(s => s.id === id);
+    const item = state.submissions.find((s) => s.id === id);
     if (!item || !isStorageInitialized) return;
 
     const updatedItem = { ...item, formData };
@@ -296,7 +306,8 @@ export function OfflineQueueProvider({
     await storage.addOrUpdateSubmission(updatedItem);
     toast({
       title: 'Submission Updated',
-      description: 'The submission data has been updated based on AI suggestion.',
+      description:
+        'The submission data has been updated based on AI suggestion.',
     });
   };
 
